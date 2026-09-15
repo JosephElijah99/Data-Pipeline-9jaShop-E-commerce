@@ -1,0 +1,52 @@
+name: NaijaShop Full Pipeline Orchestration
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:        # manual "Run workflow" button for testing
+
+jobs:
+  refresh-orders:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install faker psycopg2-binary
+      # Refreshes the orders/customers dataset directly in Neon
+      - env:
+          NEON_HOST: ${{ secrets.NEON_HOST }}
+          NEON_DB: ${{ secrets.NEON_DB }}
+          NEON_USER: ${{ secrets.NEON_USER }}
+          NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
+        run: |
+          python seed_data.py --load-pg --dsn "dbname=${NEON_DB} user=${NEON_USER} password=${NEON_PASSWORD} host=${NEON_HOST} sslmode=require"
+
+  trigger-airbyte-syncs:
+    runs-on: ubuntu-latest
+    needs: refresh-orders   # only runs after orders finish, keeps things in order
+    steps:
+      # Calls Airbyte Cloud's API directly to kick off the exchange-rate sync.
+      # AIRBYTE_API_TOKEN and the two connection IDs come from your Airbyte
+      # Cloud account settings (Settings -> Applications -> API keys, and
+      # each connection's own settings page for its ID)
+      - name: Trigger exchange rate sync
+        env:
+          AIRBYTE_TOKEN: ${{ secrets.AIRBYTE_API_TOKEN }}
+          CONNECTION_ID: ${{ secrets.AIRBYTE_EXCHANGE_RATE_CONNECTION_ID }}
+        run: |
+          curl -X POST "https://api.airbyte.com/v1/jobs" \
+            -H "Authorization: Bearer ${AIRBYTE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"connectionId\": \"${CONNECTION_ID}\", \"jobType\": \"sync\"}"
+
+      - name: Trigger marketing spend sync
+        env:
+          AIRBYTE_TOKEN: ${{ secrets.AIRBYTE_API_TOKEN }}
+          CONNECTION_ID: ${{ secrets.AIRBYTE_MARKETING_CONNECTION_ID }}
+        run: |
+          curl -X POST "https://api.airbyte.com/v1/jobs" \
+            -H "Authorization: Bearer ${AIRBYTE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"connectionId\": \"${CONNECTION_ID}\", \"jobType\": \"sync\"}"
